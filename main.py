@@ -8,12 +8,13 @@ from PyQt6.QtWidgets import (QApplication, QLabel, QMainWindow, QVBoxLayout,
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QBrush, QIcon
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPointF
 
-# Fix for Windows Taskbar Icon (Grouping)
+# --- MANDATORY WINDOWS TASKBAR FIX ---
+# This forces Windows to recognize the icon even when running via a script
 try:
-    myappid = 'vision.system.tracker.v2'
+    myappid = 'vision.system.tracker.v2' # Unique string
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-except Exception:
-    pass
+except Exception as e:
+    print(f"Windows Taskbar Fix failed: {e}")
 
 class StreamWorker(QThread):
     frame_received = pyqtSignal(QPixmap, dict)
@@ -28,19 +29,15 @@ class StreamWorker(QThread):
     def run(self):
         while self.running:
             pos_data = {}
-            
-            # --- 1. ATTEMPT POSITION FETCH (Isolated) ---
             try:
                 endpoint = "/position_grid_full" if self.mode == "grid" else "/position"
                 current_timeout = 2.0 if self.mode == "grid" else 0.8
-
                 pos_resp = requests.get(f"{self.base_url}{endpoint}", timeout=current_timeout)
                 pos_resp.raise_for_status()
                 pos_data = pos_resp.json()
-            except Exception as e:
+            except Exception:
                 pos_data = {"_network_error": True}
 
-            # --- 2. ATTEMPT IMAGE FETCH ---
             try:
                 img_resp = requests.get(f"{self.base_url}/image", timeout=1.0)
                 img_resp.raise_for_status()
@@ -50,13 +47,10 @@ class StreamWorker(QThread):
                 if base64_string:
                     image_bytes = base64.b64decode(base64_string)
                     qimage = QImage.fromData(image_bytes)
-                    
                     if not qimage.isNull():
                         pixmap = QPixmap.fromImage(qimage)
                         self.frame_received.emit(pixmap, pos_data)
-                
                 self.msleep(30) 
-                
             except Exception as e:
                 self.error_occurred.emit(f"Stream Connection Lost: {str(e)}")
                 self.msleep(1000)
@@ -72,14 +66,19 @@ class ImageApp(QMainWindow):
         self.setMinimumSize(600, 500)
         self.setStyleSheet("QMainWindow { background-color: #121212; }")
         
-        # --- SET APP ICON ---
-        icon_path = os.path.join(os.path.dirname(__file__), "icon.png")
+        # --- ROBUST ICON LOADING ---
+        # Get the absolute path to the directory where this script is saved
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        icon_path = os.path.join(script_dir, "icon.png")
+        
         if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
+            self.app_icon = QIcon(icon_path)
+            self.setWindowIcon(self.app_icon)
+        else:
+            print(f"Warning: Icon not found at {icon_path}")
         
         self.last_pixmap = None  
         self.last_data = {}
-
         self.stacked_widget = QStackedWidget()
         self.setCentralWidget(self.stacked_widget)
         
@@ -113,7 +112,7 @@ class ImageApp(QMainWindow):
         layout = QVBoxLayout(page)
         
         ctrl_layout = QHBoxLayout()
-        self.mode_button = QPushButton("MODE: SINGLE BEAM")
+        self.mode_button = QPushButton("MODE: SINGLE")
         self.mode_button.setStyleSheet("background-color: #1976D2; color: white; font-weight: bold; padding: 8px;")
         self.mode_button.clicked.connect(self.toggle_mode)
 
@@ -142,10 +141,10 @@ class ImageApp(QMainWindow):
         if hasattr(self, 'worker'):
             if self.worker.mode == "single":
                 self.worker.mode = "grid"
-                self.mode_button.setText("MODE: FULL GRID")
+                self.mode_button.setText("MODE: GRID")
             else:
                 self.worker.mode = "single"
-                self.mode_button.setText("MODE: SINGLE BEAM")
+                self.mode_button.setText("MODE: SINGLE")
 
     def start_stream(self):
         self.stacked_widget.setCurrentIndex(1)
@@ -164,8 +163,7 @@ class ImageApp(QMainWindow):
         if data.get("_network_error"):
             self.coord_label.setText("STATUS: TELEMETRY OFFLINE")
         else:
-            x = data.get("position_x")
-            y = data.get("position_y")
+            x, y = data.get("position_x"), data.get("position_y")
 
             if x is None or y is None:
                 self.coord_label.setText("STATUS: SEARCHING... (No Beam)")
@@ -175,7 +173,6 @@ class ImageApp(QMainWindow):
                     painter.setPen(grid_pen)
                     mv, cv = data.get("vertical_line_gradient"), data.get("vertical_line_intercept")
                     mh, ch = data.get("horizontal_line_gradient"), data.get("horizontal_line_intercept")
-                    
                     if all(v is not None for v in [mv, cv]):
                         painter.drawLine(QPointF(0, cv), QPointF(pixmap.width(), mv * pixmap.width() + cv))
                     if all(v is not None for v in [mh, ch]):
@@ -191,11 +188,7 @@ class ImageApp(QMainWindow):
 
     def display_pixmap(self, pixmap):
         if not pixmap.isNull():
-            scaled = pixmap.scaled(
-                self.image_display.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
+            scaled = pixmap.scaled(self.image_display.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             self.image_display.setPixmap(scaled)
 
     def resizeEvent(self, event):
@@ -210,7 +203,15 @@ class ImageApp(QMainWindow):
         self.stacked_widget.setCurrentIndex(0)
 
 if __name__ == "__main__":
+    # Create the app instance FIRST, then apply the icon
     app = QApplication(sys.argv)
+    
+    # Apply global app icon
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    global_icon_path = os.path.join(script_dir, "icon.png")
+    if os.path.exists(global_icon_path):
+        app.setWindowIcon(QIcon(global_icon_path))
+        
     window = ImageApp()
     window.show()
     sys.exit(app.exec())
